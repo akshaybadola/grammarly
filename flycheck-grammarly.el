@@ -75,8 +75,38 @@
 (defvar-local flycheck-grammarly--last-buffer-string nil
   "Record the last buffer string.")
 
+(defvar flycheck-grammarly-check-strings nil
+  "Alist of all check strings.")
+
 (defvar-local flycheck-grammarly--request-timer nil
   "Timer that will tell to do the request.")
+
+(defun flycheck-grammarly-check-string ()
+  (pcase major-mode
+    ('org-mode
+     ;; (pcase-let* ((`(,beg ,end ,has-body) (ref-man-org-text-bounds))
+     ;;              (text (when has-body (buffer-substring-no-properties beg end))))
+     ;;   (when text
+     ;;     (with-temp-buffer
+     ;;       (insert text)
+     ;;       (org-mode)
+     ;;       (goto-char (point-min))
+     ;;       (let ((fill-column 10000))
+     ;;         (while (not (eobp))
+     ;;           (org-fill-element)
+     ;;           (forward-line)))
+     ;;       (buffer-string))))
+     (pcase-let ((`(,beg ,end ,has-body) (ref-man-org-text-bounds)))
+       (when has-body
+         (buffer-substring-no-properties beg end))))
+    (_ (buffer-string))))
+
+(defun flycheck-grammarly-get-offset ()
+  (pcase major-mode
+    ('org-mode
+     (pcase-let ((`(,beg ,end ,has-body) (ref-man-org-text-bounds)))
+       beg))
+    (_ (point-min))))
 
 (defun flycheck-grammarly--column-at-pos (&optional pt)
   "Column at PT."
@@ -103,8 +133,10 @@
     (flycheck-grammarly--debug-message
      "[INFO] Receiving data from grammarly, level (%s) : %s"
      (length flycheck-grammarly--point-data) data)
-    (when (string-match-p "\"highlightBegin\":" data)
-      (push data flycheck-grammarly--point-data))))
+    (push (json-read-from-string data) flycheck-grammarly--point-data)
+    ;; (when (string-match-p "\"highlightBegin\":" data)
+    ;;   (push data flycheck-grammarly--point-data))
+    ))
 
 (defun flycheck-grammarly--on-close ()
   "On close Grammarly API."
@@ -112,7 +144,7 @@
     (setq flycheck-grammarly--done-checking t)
     (flycheck-buffer-automatically)))
 
-(defun flycheck-grammarly--minified-string (str)
+(defun flycheck-grammarly-checksum (str)
   "Minify the STR to check if any text changed."
   (declare (side-effect-free t))
   (md5 (replace-regexp-in-string "[[:space:]\n]+" " " str)))
@@ -126,15 +158,15 @@
 (defun flycheck-grammarly--reset-request ()
   "Reset some variables so the next time the user done typing can reuse."
   (flycheck-grammarly--debug-message "[INFO] Reset grammarly requests!")
-  (setq flycheck-grammarly--last-buffer-string (buffer-string)
+  (setq flycheck-grammarly--last-buffer-string (flycheck-grammarly-check-string)
         flycheck-grammarly--point-data nil
         flycheck-grammarly--done-checking nil))
 
 (defun flycheck-grammarly--after-change-functions (&rest _)
   "After change function to check if content change."
   (unless (string=
-           (flycheck-grammarly--minified-string flycheck-grammarly--last-buffer-string)
-           (flycheck-grammarly--minified-string (buffer-string)))
+           (flycheck-grammarly-checksum flycheck-grammarly--last-buffer-string)
+           (flycheck-grammarly-checksum (flycheck-grammarly-check-string)))
     (flycheck-grammarly--kill-timer)
     (setq flycheck-grammarly--request-timer
           (run-with-idle-timer flycheck-grammarly-check-time nil
@@ -148,16 +180,27 @@
 
 (defun flycheck-grammarly--html-to-text (html)
   "Turn HTML to text."
-  (with-temp-buffer
-    (insert html)
-    (goto-char (point-min))
-    (while (not (= (point) (point-max)))
-      (let ((replace-data (flycheck-grammarly--encode-char (char-before))))
-        (when replace-data
-          (backward-delete-char (cdr replace-data))
-          (insert (car replace-data))))
-      (forward-char 1))
-    (dom-texts (libxml-parse-html-region (point-min) (point-max)))))
+  (let* ((buf (get-buffer-create " *flycheck-grammarly-temp-buf*"))
+         (str (with-current-buffer buf
+                (erase-buffer)
+                (goto-char (point-min))
+                (insert (string-replace "\302\240" " " html))
+                (let ((pt (point)))
+                  (shr-insert-document (libxml-parse-html-region (point-min) (point-max)))
+                  (goto-char pt)
+                  (buffer-substring pt (point-max))))))
+    (replace-regexp-in-string "\n" "" str))
+  ;; (with-temp-buffer
+  ;;   (insert (string-replace "\\302\\240" " " html))
+  ;;   (goto-char (point-min))
+  ;;   (while (not (= (point) (point-max)))
+  ;;     (let ((replace-data (flycheck-grammarly--encode-char (char-before))))
+  ;;       (when replace-data
+  ;;         (backward-delete-char (cdr replace-data))
+  ;;         (insert (car replace-data))))
+  ;;     (forward-char 1))
+  ;;   (dom-texts (libxml-parse-html-region (point-min) (point-max))))
+  )
 
 (defun flycheck-grammarly--grab-info (data attr)
   "Grab value through ATTR key with DATA."
@@ -177,26 +220,70 @@
         desc (replace-regexp-in-string "[ ]+" " " desc))
   desc)
 
+(setq my/flycheck-grammarly-transforms nil)
+(setq my/flycheck-grammarly-data nil)
+
 (defun flycheck-grammarly--check-all ()
   "Check grammar for buffer document."
-  (let (check-list)
+  (message "Annotating grammarly region...")
+  (let ((offset (flycheck-grammarly-get-offset))
+        (flycheck-grammarly--point-data
+         (-filter (lambda (x) (a-get x 'highlightBegin)) flycheck-grammarly--point-data))
+        check-list)
     (dolist (data flycheck-grammarly--point-data)
-      (let* ((offset (point-min))  ; narrowed buffer
-             (pt-beg (+ offset (flycheck-grammarly--grab-info data "highlightBegin")))
-             (pt-end (+ offset (flycheck-grammarly--grab-info data "highlightEnd")))
+      (let* ( ; narrowed buffer
+             (pt-beg (+ offset (a-get data 'highlightBegin)))
+             (pt-end (+ offset (a-get data 'highlightBegin)))
              (ln (line-number-at-pos pt-beg t))
              (col-start (flycheck-grammarly--column-at-pos pt-beg))
              (col-end (flycheck-grammarly--column-at-pos pt-end))
-             (exp (flycheck-grammarly--grab-info data "explanation"))
-             (card-desc (unless exp (flycheck-grammarly--grab-info data "cardLayout groupDescription")))
+             (exp (a-get data 'explanation))
+             (card-desc (unless exp (a-get* data 'cardLayout 'groupDescription)))
              (desc (flycheck-grammarly--html-to-text (or exp card-desc "")))
-             (type (if exp (if (string-match-p "error" data) 'error 'warning) 'info)))
-        (cond ((stringp data)
-               (push (json-read-from-string data) my/grammarly-data))
-              ((and (listp args) (stringp (cadr data)))
-               (push (json-read-from-string (cadr data)) my/grammarly-data))
-              (push data my/grammarly-data))
-        (setq desc (flycheck-grammarly--valid-description desc))
+             (type (if exp (if (string-match-p "error" (json-encode data)) 'error 'warning) 'info))
+
+             (parsed-data data)
+             (transforms (a-get parsed-data 'transforms))
+             (beg (a-get parsed-data 'highlightBegin))
+             (end (a-get parsed-data 'highlightEnd))
+             (text (when (and beg end)
+                     (substring-no-properties grammarly--text beg end)))
+             (context (list (a-get* parsed-data 'cardContext 's)
+                            (a-get* parsed-data 'cardContext 'e)))
+             (context (when (-all? 'identity context)
+                        (apply 'substring-no-properties
+                               grammarly--text context)))
+             (highlighted (a-get parsed-data 'highlightText))
+             (title (a-get parsed-data 'title))
+             (splits (when transforms
+                       (seq-map (lambda (x) (split-string
+                                             (flycheck-grammarly--html-to-text x)))
+                                transforms)))
+             (replacements (a-get parsed-data 'replacements))
+             (suggestions (when replacements
+                            (if (string-empty-p (a-get parsed-data 'text))
+                                (string-join (seq-map (lambda (x)
+                                                        (concat x highlighted))
+                                                      replacements)
+                                             ", ")
+                              (string-join (seq-map (lambda (x)
+                                                        (replace-regexp-in-string (a-get parsed-data 'text)
+                                                                                  x highlighted))
+                                                      replacements)
+                                           ", "))))
+             (desc (if splits (concat
+                               ;; (mapconcat
+                               ;;  (lambda (x) (format "%s -> %s" (car x) (-last-item x)))
+                               ;;  splits "\n")
+                               ;; "\n"
+                               highlighted " -> " suggestions
+                               "\n"
+                               (string-replace "\\302\\240" " " title)
+                               "\n"
+                               desc)
+                     desc)))
+        (when transforms (push transforms my/flycheck-grammarly-transforms))
+        (when transforms (push parsed-data my/flycheck-grammarly-data))
         (push (list ln col-start type desc :end-column col-end) check-list)))
     check-list))
 
@@ -208,14 +295,14 @@
 
 (defun flycheck-grammarly--grammar-check ()
   "Grammar check once."
-  (unless flycheck-grammarly--done-checking
+  (message "Sending grammarly check request...")
+  (flycheck-grammarly--debug-message "[Initializing Grammar Check]")
+  (unless (and flycheck-grammarly--done-checking
+               (string= (flycheck-grammarly-checksum flycheck-grammarly--last-buffer-string)
+                        (flycheck-grammarly-checksum (flycheck-grammarly-check-string))))
     (flycheck-grammarly--reset-request)
     (grammarly-check-text (flycheck-grammarly--apply-avoidance-rule
-                           (cond ((eq major-mode 'org-mode)
-                                  (pcase-let ((`(,beg ,end ,has-body) (ref-man-org-text-bounds)))
-                                    (when has-body
-                                      (buffer-substring-no-properties beg end))))
-                                 (t (buffer-string)))))))
+                           (flycheck-grammarly-check-string)))))
 
 (defun flycheck-grammarly--start (checker callback)
   "Flycheck start function for CHECKER, invoking CALLBACK."

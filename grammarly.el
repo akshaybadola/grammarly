@@ -305,6 +305,9 @@ login <YOUR-EMAIL> pass <YOUR-PASSWORD>\"."
     (setf (nth 0 (cdr (nth 0 req))) (s-replace "$STR$" text "+0:0:$STR$:0"))
     req))
 
+(setq my/grammarly-open-data nil)
+(setq my/grammarly-data nil)
+
 (defun grammarly--after-got-cookie ()
   "Execution after received all needed cookies."
   (grammarly--kill-websocket)
@@ -323,7 +326,7 @@ login <YOUR-EMAIL> pass <YOUR-PASSWORD>\"."
       (websocket-send-text grammarly--client (json-encode (grammarly--form-check-request grammarly--text))))
     :on-message
     (lambda (_ws frame)
-      (push (json-read-from-string (websocket-frame-payload frame)) my/test)
+      (push (json-read-from-string (websocket-frame-payload frame)) my/grammarly-data)
       (grammarly--execute-function-list grammarly-on-message-function-list (websocket-frame-payload frame))
       (grammarly--default-callback (websocket-frame-payload frame)))
     :on-error
