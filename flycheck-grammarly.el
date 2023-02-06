@@ -84,22 +84,11 @@
 (defun flycheck-grammarly-check-string ()
   (pcase major-mode
     ('org-mode
-     ;; (pcase-let* ((`(,beg ,end ,has-body) (ref-man-org-text-bounds))
-     ;;              (text (when has-body (buffer-substring-no-properties beg end))))
-     ;;   (when text
-     ;;     (with-temp-buffer
-     ;;       (insert text)
-     ;;       (org-mode)
-     ;;       (goto-char (point-min))
-     ;;       (let ((fill-column 10000))
-     ;;         (while (not (eobp))
-     ;;           (org-fill-element)
-     ;;           (forward-line)))
-     ;;       (buffer-string))))
      (pcase-let ((`(,beg ,end ,has-body) (ref-man-org-text-bounds)))
        (when has-body
          (buffer-substring-no-properties beg end))))
-    (_ (buffer-string))))
+    (_ (buffer-substring-no-properties (progn (backward-paragraph) (point))
+                                       (progn (forward-paragraph) (point))))))
 
 (defun flycheck-grammarly-get-offset ()
   (pcase major-mode
