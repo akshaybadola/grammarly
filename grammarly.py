@@ -1,8 +1,12 @@
+import atexit
 import json
 from threading import Thread
 
 import requests
 import websocket
+
+from flask import Flask, request
+from werkzeug import run_simple
 
 
 class GrammarlyApp:
@@ -42,13 +46,17 @@ class GrammarlyApp:
         self.ws = None
         self._id = 0
         self.accces_token = access_token
-        self._messages = []
+        self._current_text = "INIT"
+        self._messages = {self._current_text: []}
         self.init_msg = self.init_msg.copy()
         if opts:
             self.init_msg = {**self.init_msg, **opts}
         self.authenticate()
-        self.start()
+        self.start_grammarly_ws()
         self.closed = False
+        self._app = Flask("Grammarly")
+        self._init_routes()
+        atexit.register(self.close)
 
     @property
     def cookie_str(self):
@@ -68,6 +76,10 @@ class GrammarlyApp:
         self._id += 1
         return self._id
 
+    @property
+    def keys(self):
+        return [*self._messages.keys()]
+
     def authenticate(self):
         print("Authenticating grammarly app")
         response = requests.get(self._auth_url, headers=self.auth_headers)
@@ -77,16 +89,17 @@ class GrammarlyApp:
             raise ValueError("Could not authenticate")
         self.cookie = response.cookies
 
-    def start(self):
+    def start_grammarly_ws(self):
         self.closed = False
         print("Starting grammarly app")
+        self._current_text = "INIT"
         self.ws = websocket.WebSocketApp("wss://capi.grammarly.com/freews",
                                          header=self.ws_headers,
                                          on_open=self.send_init_msg,
                                          on_message=self.on_message,
                                          on_close=self.on_close)
-        self.t = Thread(target=self.ws.run_forever)
-        self.t.start()
+        self.ws_thread = Thread(target=self.ws.run_forever)
+        self.ws_thread.start()
         print("Started grammarly app")
 
     def on_close(self, app, status, message):
@@ -95,25 +108,85 @@ class GrammarlyApp:
             print(message)
         print("self.closed", self.closed)
         if not self.closed:
-            self.start()
+            self.start_grammarly_ws()
 
     def on_message(self, app, message):
-        self._messages.append(json.loads(message))
+        self._messages[self._current_text].append(json.loads(message))
 
     def send_init_msg(self, app):
         self.ws.send(json.dumps(self.init_msg))
-        return self.ws.recv()
 
     def send_check_request(self, text):
+        self._current_text = text
+        self._messages[self._current_text] = []
         req_dict = {"ch": [f"+0:0:{text}:0"],
                     "rev": 0,
                     "action": "submit_ot",
                     "id": self.id}
         self.ws.send(json.dumps(req_dict))
 
+    def get_alerts_for_check_number(self, num: int):
+        submit_count = 0
+        beg = None
+        end = None
+        check_beg = False
+        check_end = False
+        for i, msg in enumerate(self._messages):
+            if msg["action"] == "start":
+                submit_count += 1
+                if submit_count == num:
+                    check_beg = True
+            if check_beg and msg["action"] == "alert":
+                beg = i
+                check_end = True
+            else:
+                if check_beg and check_end:
+                    end = i
+        return beg, end
+
     def close(self):
         self.closed = True
         self.ws.close()
+
+    def get_check_text(self, request):
+        if request.method == "GET":
+            if "num" not in request.args:
+                return json.dumps({"error": "Message num must be given"})
+            else:
+                try:
+                    num = int(request.args.get("num"))
+                except Exception as e:
+                    return json.dumps({"error": f"{e}"})
+            text = self.keys[num]
+        else:
+            data = request.json
+            if "text" not in data:
+                return json.dumps({"error": "No text given"})
+            text = data["text"]
+        return text
+
+    def _init_routes(self):
+        @self._app.route("/check", methods=["POST"])
+        def __check():
+            data = request.json
+            text = data.get("text", None)
+            if not text:
+                return json.dumps({"error": "No text given"})
+            self.send_check_request(text)
+            return json.dumps({"success": "Sent request"})
+
+        @self._app.route("/check_finished", methods=["GET"])
+        def __messages():
+            text = self.get_check_text(request)
+            return json.dumps(any("finished" in x for x in self._messages[text]))
+
+        @self._app.route("/results", methods=["GET", "POST"])
+        def __last_check_results():
+            text = self.get_check_text(request)
+            return self._messages[text]
+
+    def start(self):
+        run_simple(self.hostname, self.port, self._app, threaded=True)
 
 
 if __name__ == '__main__':

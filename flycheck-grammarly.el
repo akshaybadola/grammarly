@@ -81,21 +81,59 @@
 (defvar-local flycheck-grammarly--request-timer nil
   "Timer that will tell to do the request.")
 
-(defun flycheck-grammarly-check-string ()
+(defun flycheck-grammarly-post-cmd-hook ()
+  (pcase-let ((`(,prev-beg ,prev-end) flycheck-grammarly-previous-check-string-bounds)
+              (`(,current-beg ,current-end) (flycheck-grammarly-check-string-bounds)))
+    (unless (and (= prev-beg current-beg) (= prev-end current-end))
+      )))
+
+(defun flycheck-grammarly-check-string-bounds ()
+  "Return the string to check with grammarly.
+
+Passing large buffers to grammarly can cause fewer grammar errors
+to be reported and large number of flycheck errors also cause
+issues.  Instead we pass only the current paragraph or
+org subtree if in `org-mode'."
   (pcase major-mode
     ('org-mode
      (pcase-let ((`(,beg ,end ,has-body) (ref-man-org-text-bounds)))
-       (when has-body
-         (buffer-substring-no-properties beg end))))
-    (_ (buffer-substring-no-properties (progn (backward-paragraph) (point))
-                                       (progn (forward-paragraph) (point))))))
+       (when has-body (list beg end))))
+    (_ (let* ((newlines (looking-at-p "\n\n"))
+              (separating (-all? #'looking-at-p `(,paragraph-start ,paragraph-separate)))
+              (beg (save-excursion (if (and separating (not newlines))
+                                       (progn (re-search-forward "\n" nil t)
+                                              (- (point-at-bol) 1))
+                                     (re-search-backward "\n\n" nil t)
+                                     (+ (point) 1))))
+              (end (save-excursion (if (and separating newlines)
+                                       (+ (point) 1)
+                                     (re-search-forward "\n\n" nil t)
+                                     (- (point) 1)))))
+         (list beg end)))))
+
+(defun flycheck-grammarly-check-string ()
+  "Return the string to check with grammarly.
+
+Passing large buffers to grammarly can cause fewer grammar errors
+to be reported and large number of flycheck errors also cause
+issues.  Instead we pass only the current paragraph or
+org subtree if in `org-mode'.
+
+See `flycheck-grammarly-check-string-bounds'."
+  (pcase-let ((`(,beg ,end) (flycheck-grammarly-check-string-bounds)))
+    (when (and beg and)
+      (buffer-substring-no-properties beg end))))
 
 (defun flycheck-grammarly-get-offset ()
   (pcase major-mode
     ('org-mode
      (pcase-let ((`(,beg ,end ,has-body) (ref-man-org-text-bounds)))
        beg))
-    (_ (point-min))))
+    (_ (save-excursion (if (and separating (not newlines))
+                           (progn (re-search-forward "\n" nil t)
+                                  (- (point-at-bol) 1))
+                         (re-search-backward "\n\n" nil t)
+                         (+ (point) 1))))))
 
 (defun flycheck-grammarly--column-at-pos (&optional pt)
   "Column at PT."
