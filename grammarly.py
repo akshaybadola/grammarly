@@ -1,3 +1,5 @@
+from typing import List, Dict
+import argparse
 import atexit
 import json
 from threading import Thread
@@ -40,14 +42,16 @@ class GrammarlyApp:
                     "Upgrade-Insecure-Requests": "1",
                     "Referer": "https://www.grammarly.com/"}
 
-    def __init__(self, access_token=None, opts=None):
+    def __init__(self, hostname: str, port: int, access_token=None, opts=None):
         self._auth_url = "https://grammarly.com/signin"
         self.cookie = None
         self.ws = None
         self._id = 0
         self.accces_token = access_token
         self._current_text = "INIT"
-        self._messages = {self._current_text: []}
+        self._messages: Dict[str, List[Dict]] = {self._current_text: []}
+        self.hostname = hostname
+        self.port = port
         self.init_msg = self.init_msg.copy()
         if opts:
             self.init_msg = {**self.init_msg, **opts}
@@ -81,6 +85,8 @@ class GrammarlyApp:
         return [*self._messages.keys()]
 
     def authenticate(self):
+        """Authenticating Grammarly App
+        """
         print("Authenticating grammarly app")
         response = requests.get(self._auth_url, headers=self.auth_headers)
         if response.status_code == 200:
@@ -90,6 +96,8 @@ class GrammarlyApp:
         self.cookie = response.cookies
 
     def start_grammarly_ws(self):
+        """Start Grammarly WebsocketApp
+        """
         self.closed = False
         print("Starting grammarly app")
         self._current_text = "INIT"
@@ -103,6 +111,15 @@ class GrammarlyApp:
         print("Started grammarly app")
 
     def on_close(self, app, status, message):
+        """Close callback for Grammarly websocket
+
+        Args:
+            app: app context for Grammarly websocket
+            status: Status
+            message: Message received when closing
+
+
+        """
         print("App closed", status)
         if message:
             print(message)
@@ -110,28 +127,57 @@ class GrammarlyApp:
         if not self.closed:
             self.start_grammarly_ws()
 
-    def on_message(self, app, message):
-        self._messages[self._current_text].append(json.loads(message))
+    def on_message(self, app: Flask, message: str):
+        """Message callback for Grammarly websocket
 
-    def send_init_msg(self, app):
-        self.ws.send(json.dumps(self.init_msg))
+        Args:
+            app: app context for Grammarly websocket
+            message: Message received from Grammarly websocket
 
-    def send_check_request(self, text):
+
+        """
+        if self.ws is None:
+            raise TypeError("Websocket not initialized")
+        else:
+            self._messages[self._current_text].append(json.loads(message))
+
+    def send_init_msg(self, app: Flask):
+        """Send init message to Grammarly websocket
+
+        Args:
+            app: app context for Grammarly websocket
+
+        """
+        if self.ws is None:
+            raise TypeError("Websocket not initialized")
+        else:
+            self.ws.send(json.dumps(self.init_msg))
+
+    def send_check_request(self, text: str):
+        """Send `text` to Grammarly websocket
+
+        Args:
+            text: Text to check
+
+        """
         self._current_text = text
         self._messages[self._current_text] = []
         req_dict = {"ch": [f"+0:0:{text}:0"],
                     "rev": 0,
                     "action": "submit_ot",
                     "id": self.id}
-        self.ws.send(json.dumps(req_dict))
+        if self.ws is None:
+            raise TypeError("Websocket not initialized")
+        else:
+            self.ws.send(json.dumps(req_dict))
 
-    def get_alerts_for_check_number(self, num: int):
+    def get_alerts_for_check_number(self, key: str, num: int):
         submit_count = 0
         beg = None
         end = None
         check_beg = False
         check_end = False
-        for i, msg in enumerate(self._messages):
+        for i, msg in enumerate(self._messages[key]):
             if msg["action"] == "start":
                 submit_count += 1
                 if submit_count == num:
@@ -149,6 +195,13 @@ class GrammarlyApp:
         self.ws.close()
 
     def get_check_text(self, request):
+        """Subroutine to get check text depending on the request type
+
+        Args:
+            request: an instance of :code:`request`
+
+
+        """
         if request.method == "GET":
             if "num" not in request.args:
                 return json.dumps({"error": "Message num must be given"})
@@ -166,6 +219,8 @@ class GrammarlyApp:
         return text
 
     def _init_routes(self):
+        """Initialize Routes
+        """
         @self._app.route("/check", methods=["POST"])
         def __check():
             data = request.json
@@ -175,21 +230,29 @@ class GrammarlyApp:
             self.send_check_request(text)
             return json.dumps({"success": "Sent request"})
 
-        @self._app.route("/check_finished", methods=["GET"])
-        def __messages():
-            text = self.get_check_text(request)
-            return json.dumps(any("finished" in x for x in self._messages[text]))
-
         @self._app.route("/results", methods=["GET", "POST"])
         def __last_check_results():
             text = self.get_check_text(request)
-            return self._messages[text]
+            return json.dumps(self._messages[text])
+
+        @self._app.route("/check_finished", methods=["GET", "POST"])
+        def __messages():
+            text = self.get_check_text(request)
+            finished = any([('action', 'finished') in x.items()
+                            for x in self._messages[text]])
+            return json.dumps(finished)
 
     def start(self):
         run_simple(self.hostname, self.port, self._app, threaded=True)
 
 
 if __name__ == '__main__':
-    app = GrammarlyApp()
-    check_text = "Hellow world!!!"
-    app.send_check_request(check_text)
+    # app = GrammarlyApp()
+    # check_text = "Hellow world!!!"
+    # app.send_check_request(check_text)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("hostname")
+    parser.add_argument("port", type=int)
+    args = parser.parse_args()
+    app = GrammarlyApp(args.hostname, args.port)
+    app.start()
