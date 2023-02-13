@@ -233,13 +233,15 @@ class GrammarlyApp:
         @self._app.route("/results", methods=["GET", "POST"])
         def __last_check_results():
             text = self.get_check_text(request)
-            return json.dumps(self._messages[text])
+            return json.dumps(self._messages.get(text))
 
         @self._app.route("/check_finished", methods=["GET", "POST"])
         def __messages():
             text = self.get_check_text(request)
-            finished = any([('action', 'finished') in x.items()
-                            for x in self._messages[text]])
+            finished = False
+            if text in self._messages:
+                finished = any([('action', 'finished') in x.items()
+                                for x in self._messages[text]])
             return json.dumps(finished)
 
     def start(self):
