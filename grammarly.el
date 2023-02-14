@@ -117,7 +117,10 @@
 (defvar grammarly--update-time 0.1
   "Run every this seconds until we received API request.")
 
-(defvar grammarly--cookies ""
+(defvar grammarly-cookie-refresh-time 3600
+  "Time in seconds to refresh the cookie")
+
+(defvar grammarly--cookies '((time . 0) (cookie . ""))
   "Record the cookie down.")
 
 (defvar grammarly--timer nil
@@ -142,8 +145,7 @@
   "Kill the websocket."
   (when grammarly--client
     (websocket-close grammarly--client)
-    (setq grammarly--client nil))
-  )
+    (setq grammarly--client nil)))
 
 (defun grammarly--kill-timer ()
   "Kill the timer."
@@ -211,7 +213,8 @@ login <YOUR-EMAIL> pass <YOUR-PASSWORD>\"."
 
 (defun grammarly--update-cookie ()
   "Refresh the cookie once."
-  (setq grammarly--cookies (grammarly--form-cookie)))
+  (setq grammarly--cookies
+        `((time . ,(time-to-seconds)) (cookie . ,(grammarly--form-cookie)))))
 
 (defun grammarly--get-cookie ()
   "Get cookie."
@@ -239,6 +242,13 @@ login <YOUR-EMAIL> pass <YOUR-PASSWORD>\"."
     (cl-function
      (lambda (&rest args &key _error-thrown &allow-other-keys)
        (grammarly--debug-message "[ERROR] Error while getting cookie: %s" args)))))
+
+(defun grammarly-check-cookie ()
+  "Check if the cookie is stale."
+  (let ((cookie-time (a-get grammarly--cookies 'time)))
+    (if (> (- (time-to-seconds) cookie-time) grammarly-cookie-refresh-time)
+        (grammarly--get-cookie)
+      (message "Not getting new cookie"))))
 
 ;;
 ;; (@* "Login" )
@@ -293,9 +303,10 @@ login <YOUR-EMAIL> pass <YOUR-PASSWORD>\"."
 
 (defun grammarly--form-authorize-list ()
   "Form the authorize list."
-  (let ((auth (copy-sequence grammarly--authorize-msg)))
+  (let ((cookie (a-get grammarly--cookies 'cookie))
+        (auth (copy-sequence grammarly--authorize-msg)))
     ;; NOTE: Here we directly point it to the `$COOKIES$' keyword.
-    (setcdr (nth 1 auth) grammarly--cookies)
+    (setcdr (nth 1 auth) cookie)
     auth))
 
 (defun grammarly--form-check-request (text)
@@ -362,7 +373,7 @@ login <YOUR-EMAIL> pass <YOUR-PASSWORD>\"."
   (if (or (not (stringp text)) (string-empty-p text))
       (user-error "[ERROR] Text can't be 'nil' or 'empty'")
     (setq grammarly--text text)
-    (grammarly--get-cookie)
+    (grammarly-check-cookie)
     ;; Delay, until we get the initial cookie.
     (grammarly--reset-timer #'grammarly--after-got-cookie
                             '(lambda () (null grammarly--start-checking-p)))))

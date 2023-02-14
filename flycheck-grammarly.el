@@ -257,61 +257,63 @@ See `flycheck-grammarly-check-string-bounds'."
         (flycheck-grammarly--point-data
          (-filter (lambda (x) (a-get x 'highlightBegin)) flycheck-grammarly--point-data))
         check-list)
-    (dolist (data flycheck-grammarly--point-data)
-      (let* ( ; narrowed buffer
-             (pt-beg (+ offset (a-get data 'highlightBegin)))
-             (pt-end (+ offset (a-get data 'highlightBegin)))
-             (ln (line-number-at-pos pt-beg t))
-             (col-start (flycheck-grammarly--column-at-pos pt-beg))
-             (col-end (flycheck-grammarly--column-at-pos pt-end))
-             (exp (a-get data 'explanation))
-             (card-desc (unless exp (a-get* data 'cardLayout 'groupDescription)))
-             (desc (flycheck-grammarly--html-to-text (or exp card-desc "")))
-             (type (if exp (if (string-match-p "error" (json-encode data)) 'error 'warning) 'info))
+    (if flycheck-grammarly--point-data
+        (dolist (data flycheck-grammarly--point-data)
+          (let* ( ; narrowed buffer
+                 (pt-beg (+ offset (a-get data 'highlightBegin)))
+                 (pt-end (+ offset (a-get data 'highlightBegin)))
+                 (ln (line-number-at-pos pt-beg t))
+                 (col-start (flycheck-grammarly--column-at-pos pt-beg))
+                 (col-end (flycheck-grammarly--column-at-pos pt-end))
+                 (exp (a-get data 'explanation))
+                 (card-desc (unless exp (a-get* data 'cardLayout 'groupDescription)))
+                 (desc (flycheck-grammarly--html-to-text (or exp card-desc "")))
+                 (type (if exp (if (string-match-p "error" (json-encode data)) 'error 'warning) 'info))
 
-             (parsed-data data)
-             (transforms (a-get parsed-data 'transforms))
-             (beg (a-get parsed-data 'highlightBegin))
-             (end (a-get parsed-data 'highlightEnd))
-             (text (when (and beg end)
-                     (substring-no-properties grammarly--text beg end)))
-             (context (list (a-get* parsed-data 'cardContext 's)
-                            (a-get* parsed-data 'cardContext 'e)))
-             (context (when (-all? 'identity context)
-                        (apply 'substring-no-properties
-                               grammarly--text context)))
-             (highlighted (a-get parsed-data 'highlightText))
-             (title (a-get parsed-data 'title))
-             (splits (when transforms
-                       (seq-map (lambda (x) (split-string
-                                             (flycheck-grammarly--html-to-text x)))
-                                transforms)))
-             (replacements (a-get parsed-data 'replacements))
-             (suggestions (when replacements
-                            (if (string-empty-p (a-get parsed-data 'text))
-                                (string-join (seq-map (lambda (x)
-                                                        (concat x highlighted))
-                                                      replacements)
-                                             ", ")
-                              (string-join (seq-map (lambda (x)
-                                                        (replace-regexp-in-string (a-get parsed-data 'text)
-                                                                                  x highlighted))
-                                                      replacements)
-                                           ", "))))
-             (desc (if splits (concat
-                               ;; (mapconcat
-                               ;;  (lambda (x) (format "%s -> %s" (car x) (-last-item x)))
-                               ;;  splits "\n")
-                               ;; "\n"
-                               highlighted " -> " suggestions
-                               "\n"
-                               (string-replace "\\302\\240" " " title)
-                               "\n"
-                               desc)
-                     desc)))
-        (when transforms (push transforms my/flycheck-grammarly-transforms))
-        (when transforms (push parsed-data my/flycheck-grammarly-data))
-        (push (list ln col-start type desc :end-column col-end) check-list)))
+                 (parsed-data data)
+                 (transforms (a-get parsed-data 'transforms))
+                 (beg (a-get parsed-data 'highlightBegin))
+                 (end (a-get parsed-data 'highlightEnd))
+                 (text (when (and beg end)
+                         (substring-no-properties grammarly--text beg end)))
+                 (context (list (a-get* parsed-data 'cardContext 's)
+                                (a-get* parsed-data 'cardContext 'e)))
+                 (context (when (-all? 'identity context)
+                            (apply 'substring-no-properties
+                                   grammarly--text context)))
+                 (highlighted (a-get parsed-data 'highlightText))
+                 (title (a-get parsed-data 'title))
+                 (splits (when transforms
+                           (seq-map (lambda (x) (split-string
+                                                 (flycheck-grammarly--html-to-text x)))
+                                    transforms)))
+                 (replacements (a-get parsed-data 'replacements))
+                 (suggestions (when replacements
+                                (if (string-empty-p (a-get parsed-data 'text))
+                                    (string-join (seq-map (lambda (x)
+                                                            (concat x highlighted))
+                                                          replacements)
+                                                 ", ")
+                                  (string-join (seq-map (lambda (x)
+                                                          (replace-regexp-in-string (a-get parsed-data 'text)
+                                                                                    x highlighted))
+                                                        replacements)
+                                               ", "))))
+                 (desc (if splits (concat
+                                   ;; (mapconcat
+                                   ;;  (lambda (x) (format "%s -> %s" (car x) (-last-item x)))
+                                   ;;  splits "\n")
+                                   ;; "\n"
+                                   highlighted " -> " suggestions
+                                   "\n"
+                                   (string-replace "\\302\\240" " " title)
+                                   "\n"
+                                   desc)
+                         desc)))
+            (when transforms (push transforms my/flycheck-grammarly-transforms))
+            (when transforms (push parsed-data my/flycheck-grammarly-data))
+            (push (list ln col-start type desc :end-column col-end) check-list)))
+      (message "No errors in current text"))
     check-list))
 
 (defun flycheck-grammarly--apply-avoidance-rule (str)

@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Union
 import argparse
 import atexit
 import json
@@ -12,27 +12,27 @@ from werkzeug import run_simple
 
 
 class GrammarlyApp:
+    user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.14; rv:68.0) Gecko/20100101 Firefox/68.0"
+    cookie_keys = ["gnar_containerId", "funnelType",
+                   "browser_info", "csrf-token",
+                   "grauth", "redirect_location"]
     init_msg = {'type': 'initial',
                 'token': None,
                 'docid': 'dfad0927-7b35-e155-6de9-4a107053da35-43543554345',
                 'client': 'extension_chrome',
                 'protocolVersion': '1.0',
-                'clientSupports': ['full_sentence_rewrite_card',
-                                   'free_clarity_alerts',
-                                   'text_info',
-                                   'tone_cards',
-                                   'vox_check'
-                                   'readability_check',
-                                   'filler_words_check',
-                                   'sentence_variety_check',
-                                   'free_occasional_premium_alerts'],
+                'clientSupports': ["free_clarity_alerts",
+                                   "readability_check",
+                                   "filler_words_check",
+                                   "sentence_variety_check",
+                                   "free_occasional_premium_alerts"],
                 'dialect': 'american',
                 'clientVersion': '14.924.2437',
+                "extDomain": "editpad.org",
                 'action': 'start',
                 'id': 0}
     auth_headers = {"User-Agent": None,
-                    "Accept": "text/html,application/xhtml+xml,application/xml;"
-                    "q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3",
                     "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
                     "Cache-Control": "no-cache",
                     "Pragma": "no-cache",
@@ -42,7 +42,8 @@ class GrammarlyApp:
                     "Upgrade-Insecure-Requests": "1",
                     "Referer": "https://www.grammarly.com/"}
 
-    def __init__(self, hostname: str, port: int, access_token=None, opts=None):
+    def __init__(self, hostname: str, port: int, access_token=None, opts=None,
+                 check_text=None, debug=False):
         self._auth_url = "https://grammarly.com/signin"
         self.cookie = None
         self.ws = None
@@ -52,6 +53,8 @@ class GrammarlyApp:
         self._messages: Dict[str, List[Dict]] = {self._current_text: []}
         self.hostname = hostname
         self.port = port
+        self._debug = debug
+        self._check_text = check_text
         self.init_msg = self.init_msg.copy()
         if opts:
             self.init_msg = {**self.init_msg, **opts}
@@ -65,15 +68,15 @@ class GrammarlyApp:
     @property
     def cookie_str(self):
         if self.cookie is None:
-            self.fetch_cookie()
-        return ";".join([f"{k}={v}" for k, v in self.cookie.items()])
+            self.authenticate()
+        return "; ".join([f"{k}={self.cookie[k]}" for k in self.cookie_keys])
 
     @property
-    def ws_headers(self):
-        return {"origin": "chrome-extension://kbfnbcaeplbcioakkpcpgfkobkghlhen",
-                "Cookie": self.cookie_str,
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.14; rv:68.0) "
-                "Gecko/20100101 Firefox/68.0"}
+    def ws_headers(self) -> Dict[str, str]:
+        headers = {"origin": "chrome-extension://kbfnbcaeplbcioakkpcpgfkobkghlhen",
+                   "Cookie": self.cookie_str,
+                   "User-Agent": self.user_agent}
+        return headers
 
     @property
     def id(self):
@@ -83,6 +86,11 @@ class GrammarlyApp:
     @property
     def keys(self):
         return [*self._messages.keys()]
+
+    def debug(self, *msgs):
+        if self._debug:
+            for msg in msgs:
+                print(msg)
 
     def authenticate(self):
         """Authenticating Grammarly App
@@ -103,7 +111,7 @@ class GrammarlyApp:
         self._current_text = "INIT"
         self.ws = websocket.WebSocketApp("wss://capi.grammarly.com/freews",
                                          header=self.ws_headers,
-                                         on_open=self.send_init_msg,
+                                         # on_open=self.send_init_msg,
                                          on_message=self.on_message,
                                          on_close=self.on_close)
         self.ws_thread = Thread(target=self.ws.run_forever)
@@ -139,6 +147,7 @@ class GrammarlyApp:
         if self.ws is None:
             raise TypeError("Websocket not initialized")
         else:
+            self.debug("Got Message", json.loads(message))
             self._messages[self._current_text].append(json.loads(message))
 
     def send_init_msg(self, app: Flask):
@@ -151,6 +160,7 @@ class GrammarlyApp:
         if self.ws is None:
             raise TypeError("Websocket not initialized")
         else:
+            self.debug("Sending init_message", self.init_msg)
             self.ws.send(json.dumps(self.init_msg))
 
     def send_check_request(self, text: str):
@@ -165,7 +175,9 @@ class GrammarlyApp:
         req_dict = {"ch": [f"+0:0:{text}:0"],
                     "rev": 0,
                     "action": "submit_ot",
-                    "id": self.id}
+                    "id": 0}
+                    # "sessionUuid": self._messages["INIT"][-1]["sessionUuid"]}
+        self.debug("Requesting check", req_dict)
         if self.ws is None:
             raise TypeError("Websocket not initialized")
         else:
@@ -193,6 +205,21 @@ class GrammarlyApp:
     def close(self):
         self.closed = True
         self.ws.close()
+
+    def _text(self, check_text_or_num: Union[str, int]) -> str:
+        if isinstance(check_text_or_num, int):
+            text = self.keys[check_text_or_num]
+        else:
+            text = check_text_or_num
+        return text
+
+    def reset_result(self, check_text_or_num: Union[str, int]):
+        text = self._text(check_text_or_num)
+        self._messages[text] = []
+
+    def get_result(self, check_text_or_num: Union[str, int]) -> List[Dict]:
+        text = self._text(check_text_or_num)
+        return self._messages[text]
 
     def get_check_text(self, request):
         """Subroutine to get check text depending on the request type

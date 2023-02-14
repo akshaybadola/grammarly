@@ -11,7 +11,7 @@
 
 (defcustom flycheck-grammarly-py-active-modes
   '(latex-mode org-mode markdown-mode)
-  "List of major mode that work with Grammarly."
+  "List of major mode that work with `flycheck-grammarly-py'."
   :type 'list
   :group 'flycheck-grammarly-py)
 
@@ -112,7 +112,7 @@ Return value is a triple of \\='(beg end has-body) where beg is the
 point after metadata, end is the point at end of subtree and
 has-body indicates if any text is present."
   (save-excursion
-    (let* ((beg (or (org-end-of-meta-data t) (point)))
+    (let* ((beg (progn (org-end-of-meta-data t) (point)))
            (end (progn
                   (unless (org-at-heading-p)
                     (outline-next-heading))
@@ -162,7 +162,7 @@ See `flycheck-grammarly-py-check-string-bounds'."
 (defun flycheck-grammarly-py-get-offset ()
   (pcase major-mode
     ('org-mode
-     (pcase-let ((`(,beg ,end ,has-body) (ref-man-org-text-bounds)))
+     (pcase-let ((`(,beg ,end ,has-body) (flycheck-grammarly-py-org-text-bounds)))
        beg))
     (_ (save-excursion (if (and separating (not newlines))
                            (progn (re-search-forward "\n" nil t)
@@ -181,7 +181,7 @@ See `flycheck-grammarly-py-check-string-bounds'."
            (flycheck-grammarly-py-checksum flycheck-grammarly-py-last-buffer-string)
            (flycheck-grammarly-py-checksum (flycheck-grammarly-py-check-string)))
     (flycheck-grammarly-py-kill-timer)
-    (setq flycheck-grammarly-py-request-timer
+    (setq-local flycheck-grammarly-py-request-timer
           (run-with-idle-timer flycheck-grammarly-py-check-time nil
                                'flycheck-grammarly-py-reset-request))))
 
@@ -193,6 +193,69 @@ See `flycheck-grammarly-py-check-string-bounds'."
          (-filter (lambda (x) (a-get x 'highlightBegin)) flycheck-grammarly-py-point-data))
         check-list)
     (dolist (data flycheck-grammarly-py-point-data)
+      (let* ( ; narrowed buffer
+             (pt-beg (+ offset (a-get data 'highlightBegin)))
+             (pt-end (+ offset (a-get data 'highlightBegin)))
+             (ln (line-number-at-pos pt-beg t))
+             (col-start (flycheck-grammarly-py-column-at-pos pt-beg))
+             (col-end (flycheck-grammarly-py-column-at-pos pt-end))
+             (exp (a-get data 'explanation))
+             (card-desc (unless exp (a-get* data 'cardLayout 'groupDescription)))
+             (desc (flycheck-grammarly-py-html-to-text (or exp card-desc "")))
+             (type (if exp (if (string-match-p "error" (json-encode data)) 'error 'warning) 'info))
+
+             (parsed-data data)
+             (transforms (a-get parsed-data 'transforms))
+             (beg (a-get parsed-data 'highlightBegin))
+             (end (a-get parsed-data 'highlightEnd))
+             (text (when (and beg end)
+                     (substring-no-properties grammarly-text beg end)))
+             (context (list (a-get* parsed-data 'cardContext 's)
+                            (a-get* parsed-data 'cardContext 'e)))
+             (context (when (-all? 'identity context)
+                        (apply 'substring-no-properties
+                               grammarly-text context)))
+             (highlighted (a-get parsed-data 'highlightText))
+             (title (a-get parsed-data 'title))
+             (splits (when transforms
+                       (seq-map (lambda (x) (split-string
+                                             (flycheck-grammarly-py-html-to-text x)))
+                                transforms)))
+             (replacements (a-get parsed-data 'replacements))
+             (suggestions (when replacements
+                            (if (string-empty-p (a-get parsed-data 'text))
+                                (string-join (seq-map (lambda (x)
+                                                        (concat x highlighted))
+                                                      replacements)
+                                             ", ")
+                              (string-join (seq-map (lambda (x)
+                                                        (replace-regexp-in-string (a-get parsed-data 'text)
+                                                                                  x highlighted))
+                                                      replacements)
+                                           ", "))))
+             (desc (if splits (concat
+                               ;; (mapconcat
+                               ;;  (lambda (x) (format "%s -> %s" (car x) (-last-item x)))
+                               ;;  splits "\n")
+                               ;; "\n"
+                               highlighted " -> " suggestions
+                               "\n"
+                               (string-replace "\\302\\240" " " title)
+                               "\n"
+                               desc)
+                     desc)))
+        (when transforms (push transforms my/flycheck-grammarly-py-transforms))
+        (when transforms (push parsed-data my/flycheck-grammarly-py-data))
+        (push (list ln col-start type desc :end-column col-end) check-list)))
+    check-list))
+
+(defun flycheck-grammarly-py-parse-result (result)
+  "Check grammar for buffer document."
+  (message "Annotating grammarly region...")
+  (let ((offset (flycheck-grammarly-py-get-offset))
+        (result (-filter (lambda (x) (a-get x 'highlightBegin)) result))
+        check-list)
+    (dolist (data result)
       (let* ( ; narrowed buffer
              (pt-beg (+ offset (a-get data 'highlightBegin)))
              (pt-end (+ offset (a-get data 'highlightBegin)))
@@ -304,7 +367,7 @@ content-type as application/json and DATA is encoded as json."
   (unless (member str flycheck-grammarly-py-check-strings)
     (let ((url (flycheck-grammarly-py-url "check"))
           (data `(("text" . ,str))))
-      (flycheck-grammarly-py-info "Sending string to check %s %s" (current-buffer))
+      (flycheck-grammarly-py-info "Sending string to check %s" (current-buffer))
       (let ((buf (with-current-buffer (flycheck-grammarly-py-post-json-synchronous url data))))
         (message "%s" (with-current-buffer buf
                         (goto-char (point-min))
@@ -313,6 +376,7 @@ content-type as application/json and DATA is encoded as json."
   (push str flycheck-grammarly-py-check-strings))
 
 (defun flycheck-grammarly-py-get-result ()
+  (interactive)
   (flycheck-grammarly-py-info "Getting results in %s" (current-buffer))
   (let ((check-string (flycheck-grammarly-py-check-string))
         (finished flycheck-grammarly-py-flycheck-checker-finished))
@@ -323,8 +387,13 @@ content-type as application/json and DATA is encoded as json."
                        (goto-char (point-min))
                        (forward-paragraph)
                        (json-read)))
+             (grammarly-error (a-get (seq-first result) 'error))
              (callback flycheck-grammarly-py-flycheck-callback)
              (checker flycheck-grammarly-py-flycheck-checker))
+        (when (and grammarly-error (string= grammarly-error "runtime_error"))
+          (setq flycheck-grammarly-py-check-strings
+                (delete check-string flycheck-grammarly-py-check-strings))
+          (user-error "Will need to resend the request"))
         (when callback
           (funcall
            callback 'finished
@@ -332,14 +401,16 @@ content-type as application/json and DATA is encoded as json."
             (mapcar
              (lambda (x)
                (apply #'flycheck-error-new-at `(,@x :checker ,checker)))
-             (condition-case err
-                 (if flycheck-grammarly-py-done-checking
-                     (flycheck-grammarly-py-check-all)
-                   (flycheck-stop))
-               (error (funcall callback 'errored (error-message-string err))
-                      (signal (car err) (cdr err))))))))))
+             ;; (condition-case err
+             ;;     (if flycheck-grammarly-py-done-checking
+             ;;         (flycheck-grammarly-py-check-all)
+             ;;       (flycheck-stop))
+             ;;   (error (funcall callback 'errored (error-message-string err))
+             ;;          (signal (car err) (cdr err))))
+             (flycheck-grammarly-py-parse-result result)
+             ))))))
     (when finished
-      (setq flycheck-grammarly-py-fetch-no-more t))
+      (setq-local flycheck-grammarly-py-fetch-no-more t))
     ;; TODO: Annotate buffer with flycheck here
     ))
 
@@ -356,7 +427,8 @@ content-type as application/json and DATA is encoded as json."
 
 (defun flycheck-grammarly-py-grammar-check ()
   "Grammar check with `grammarly-py' once."
-  (flycheck-grammarly-py-info "Initializing Grammar Check in %s" (current-buffer))
+  ;; (flycheck-grammarly-py-info "Initializing Grammar Check in %s" (current-buffer))
+  (message "Initializing Grammar Check in %s" (current-buffer))
   (let ((check-string (flycheck-grammarly-py-check-string)))
     (flycheck-grammarly-py-send-check-request check-string)))
 
@@ -364,12 +436,14 @@ content-type as application/json and DATA is encoded as json."
   "Flycheck start function for CHECKER, invoking CALLBACK."
   (when (memq major-mode flycheck-grammarly-py-active-modes)
     (flycheck-grammarly-py-info "Starting flycheck-grammarly-py in %s" (current-buffer))
-    (setq flycheck-grammarly-py-request-timer
-          (run-with-timer 0 5 'flycheck-grammarly-py-grammar-check))
-    (setq flycheck-grammarly-py-result-timer
-          (run-with-timer 0 5 'flycheck-grammarly-py-get-result))
-    (setq flycheck-grammarly-py-flycheck-callback callback)
-    (setq flycheck-grammarly-py-flycheck-checker checker)))
+    (flycheck-grammarly-py-grammar-check)
+    ;; (setq-local flycheck-grammarly-py-request-timer
+    ;;       (run-with-timer 0 5 'flycheck-grammarly-py-grammar-check))
+    ;; (setq-local flycheck-grammarly-py-result-timer
+    ;;       (run-with-timer 6 5 'flycheck-grammarly-py-get-result))
+    (setq-local flycheck-grammarly-py-flycheck-callback callback)
+    (setq-local flycheck-grammarly-py-flycheck-checker checker)
+    ))
 
 (flycheck-define-generic-checker 'grammarly-py
   "Grammarly flycheck definition with python process."
@@ -380,3 +454,5 @@ content-type as application/json and DATA is encoded as json."
   "Setup flycheck-package."
   (interactive)
   (add-to-list 'flycheck-checkers 'grammarly-py))
+
+(provide 'flycheck-grammarly-py)
