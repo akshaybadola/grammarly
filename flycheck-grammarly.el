@@ -121,7 +121,7 @@ org subtree if in `org-mode'.
 
 See `flycheck-grammarly-check-string-bounds'."
   (pcase-let ((`(,beg ,end) (flycheck-grammarly-check-string-bounds)))
-    (when (and beg and)
+    (when (and beg end)
       (buffer-substring-no-properties beg end))))
 
 (defun flycheck-grammarly-get-offset ()
@@ -191,9 +191,10 @@ See `flycheck-grammarly-check-string-bounds'."
 
 (defun flycheck-grammarly--after-change-functions (&rest _)
   "After change function to check if content change."
-  (unless (string=
-           (flycheck-grammarly-checksum flycheck-grammarly--last-buffer-string)
-           (flycheck-grammarly-checksum (flycheck-grammarly-check-string)))
+  (when (and flycheck-grammarly--last-buffer-string
+             (not (string=
+                   (flycheck-grammarly-checksum flycheck-grammarly--last-buffer-string)
+                   (flycheck-grammarly-checksum (flycheck-grammarly-check-string)))))
     (flycheck-grammarly--kill-timer)
     (setq flycheck-grammarly--request-timer
           (run-with-idle-timer flycheck-grammarly-check-time nil
