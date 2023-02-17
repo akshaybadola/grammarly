@@ -127,13 +127,15 @@ See `flycheck-grammarly-check-string-bounds'."
 (defun flycheck-grammarly-get-offset ()
   (pcase major-mode
     ('org-mode
-     (pcase-let ((`(,beg ,end ,has-body) (ref-man-org-text-bounds)))
+     (pcase-let ((`(,beg ,_ ,_) (ref-man-org-text-bounds)))
        beg))
-    (_ (save-excursion (if (and separating (not newlines))
-                           (progn (re-search-forward "\n" nil t)
-                                  (- (point-at-bol) 1))
-                         (re-search-backward "\n\n" nil t)
-                         (+ (point) 1))))))
+    (_ (let* ((newlines (looking-at-p "\n\n"))
+              (separating (-all? #'looking-at-p `(,paragraph-start ,paragraph-separate))))
+         (save-excursion (if (and separating (not newlines))
+                             (progn (re-search-forward "\n" nil t)
+                                    (- (point-at-bol) 1))
+                           (re-search-backward "\n\n" nil t)
+                           (+ (point) 1)))))))
 
 (defun flycheck-grammarly--column-at-pos (&optional pt)
   "Column at PT."
