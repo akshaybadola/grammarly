@@ -218,6 +218,7 @@ login <YOUR-EMAIL> pass <YOUR-PASSWORD>\"."
 
 (defun grammarly--get-cookie ()
   "Get cookie."
+  (message "Getting new cookie")
   (setq grammarly--start-checking-p nil
         grammarly--cookies "")  ; Reset to clean string.
   (request
@@ -245,6 +246,8 @@ login <YOUR-EMAIL> pass <YOUR-PASSWORD>\"."
 
 (defun grammarly-check-cookie ()
   "Check if the cookie is stale."
+  (unless (a-associative? grammarly--cookies)
+    (grammarly--get-cookie))
   (let ((cookie-time (a-get grammarly--cookies 'time)))
     (if (> (- (time-to-seconds) cookie-time) grammarly-cookie-refresh-time)
         (grammarly--get-cookie)
